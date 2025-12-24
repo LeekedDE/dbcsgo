@@ -3,6 +3,7 @@ const { loginAndConnectGC, logout } = require("./steamClient");
 const { fetchFullCsInventory } = require("./inventoryFetcher");
 const { upsertInventoryItems } = require("./inventoryUpsert");
 const { closePool } = require("./db");
+const { updatePricesFromSkinport } = require("./priceUpdater");
 
 const cmd = process.argv[2];
 
@@ -12,6 +13,7 @@ function usage() {
   console.log("  worker login-test <steamGuardCode>");
   console.log("  worker fetch-inv <steamGuardCode>");
   console.log("  worker sync-db  <steamGuardCode>");
+  console.log("  worker prices-update");
   console.log("");
   console.log("Env required:");
   console.log("  STEAM_USERNAME, STEAM_PASSWORD");
@@ -119,6 +121,13 @@ async function main() {
       await closePool();
     }
 
+    process.exit(0);
+  }
+
+  if (cmd === "prices-update") {
+    const result = await updatePricesFromSkinport({ log: console });
+    console.log("[worker] prices-update done:", result);
+    await closePool();
     process.exit(0);
   }
 
