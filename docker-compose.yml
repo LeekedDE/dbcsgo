@@ -61,8 +61,10 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       STEAM_USERNAME: ${STEAM_USERNAME}
       STEAM_PASSWORD: ${STEAM_PASSWORD}
+      GAMEFILES_ROOT: /data/gamefiles
     volumes:
       - steam_sentry_data:/data/steam
+      - ./gamefiles:/data/gamefiles:ro
 
 volumes:
   inventory_db_data:

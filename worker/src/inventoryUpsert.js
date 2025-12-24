@@ -14,111 +14,119 @@ function toBool(x) {
   if (typeof x === "boolean") return x;
   if (x == null) return null;
   const s = String(x).toLowerCase().trim();
-  if (["true", "1", "yes"].includes(s)) return true;
-  if (["false", "0", "no"].includes(s)) return false;
+  if (s === "true" || s === "1" || s === "yes") return true;
+  if (s === "false" || s === "0" || s === "no") return false;
   return null;
-}
-function toText(x) {
-  if (x == null) return null;
-  const s = String(x).trim();
-  return s.length ? s : null;
-}
-function nowIso() {
-  return new Date().toISOString();
 }
 
 /**
- * Old-logic name, but DB must never receive NULL.
- * If old builder can't produce a name, fall back to stable identifiers.
+ * Normalizes raw inventory items into DB rows.
+ * IMPORTANT: In this project, inventory_items.id is the Steam assetid (string).
  */
-function deriveMarketHashName(it) {
-  const built = buildMarketHashNameOldStyle(it);
-  if (built) return built;
+function normalizeItem(raw) {
+  if (!raw) return null;
 
-  // final safe fallbacks (stable, non-null)
-  const sysItem = toText(it?.sys_item_name);
-  const sysSkin = toText(it?.sys_skin_name);
-  if (sysItem && sysSkin) return `${sysItem} | ${sysSkin}`;
-
-  const def = toInt(it?.def_index);
-  const paint = toInt(it?.paint_index);
-  if (def != null && paint != null) return `def=${def} paint=${paint}`;
-  if (def != null) return `def=${def}`;
-
-  const id = toText(it?.id);
-  return id ? `item=${id}` : "unknown-item";
-}
-
-function normalizeItem(it) {
-  const id = toText(it?.id);
+  // Prefer a stable item id (assetid).
+  const id = raw.assetid != null ? String(raw.assetid) : raw.id != null ? String(raw.id) : null;
   if (!id) return null;
 
-  const defIndex = toInt(it?.def_index);
-  if (defIndex == null) return null; // def_index NOT NULL in table
+  // NOTE: Your raw shape might differ slightly depending on your GC source.
+  // This file keeps behavior compatible with your existing buildMarketHashNameOldStyle helper.
+  const def_index = toInt(raw.def_index ?? raw.defindex ?? raw.defIndex);
+  const paint_index = toInt(raw.paint_index ?? raw.paintindex ?? raw.paintIndex);
+  const paint_wear = toFloat(raw.paint_wear ?? raw.paintwear ?? raw.paintWear ?? raw.float);
 
-  const paintIndex = toInt(it?.paint_index);
-  const qty = Math.max(1, toInt(it?.quantity) ?? 1);
+  const prefab = raw.prefab != null ? String(raw.prefab) : null;
+  const image_path = raw.image_path != null ? String(raw.image_path) : null;
+
+  const sys_item_name = raw.sys_item_name != null ? String(raw.sys_item_name) : null;
+  const sys_skin_name = raw.sys_skin_name != null ? String(raw.sys_skin_name) : null;
+  const englishtoken = raw.englishtoken != null ? String(raw.englishtoken) : null;
+
+  const sticker_id = raw.sticker_id != null ? String(raw.sticker_id) : null;
+
+  const casket_id = raw.casket_id != null ? String(raw.casket_id) : null;
+  const custom_name = raw.custom_name != null ? String(raw.custom_name) : null;
+
+  const category = raw.category != null ? String(raw.category) : null;
+  const skin_rarity = raw.skin_rarity != null ? String(raw.skin_rarity) : null;
+  const collection = raw.collection != null ? String(raw.collection) : null;
+
+  const currency = raw.currency != null ? String(raw.currency) : null;
+
+  const quantity = toInt(raw.quantity ?? 1) ?? 1;
+  const tradable = toBool(raw.tradable);
+  const marketable = toBool(raw.marketable);
+
+  // Your existing naming logic
+  const market_hash_name =
+    raw.market_hash_name != null && String(raw.market_hash_name).trim() !== ""
+      ? String(raw.market_hash_name)
+      : buildMarketHashNameOldStyle(raw);
 
   return {
     id,
-    def_index: defIndex,
-    paint_index: paintIndex,
-    market_hash_name: deriveMarketHashName(it),
-
-    paint_wear: toFloat(it?.paint_wear),
-    prefab: toText(it?.prefab),
-    image_path: toText(it?.image_path),
-
-    sys_item_name: toText(it?.sys_item_name),
-    sys_skin_name: toText(it?.sys_skin_name),
-    englishtoken: toText(it?.englishtoken),
-
-    sticker_id: toInt(it?.sticker_id),
-
-    casket_id: toText(it?.casket_id),
-    custom_name: toText(it?.custom_name),
-
-    category: toText(it?.category),
-    skin_rarity: toText(it?.skin_rarity),
-    collection: toText(it?.collection),
-    currency: toText(it?.currency),
-
-    quantity: qty,
-    tradable: toBool(it?.tradable),
-    marketable: toBool(it?.marketable),
-
-    raw: it,
+    def_index,
+    paint_index,
+    market_hash_name,
+    paint_wear,
+    prefab,
+    image_path,
+    sys_item_name,
+    sys_skin_name,
+    englishtoken,
+    sticker_id,
+    casket_id,
+    custom_name,
+    category,
+    skin_rarity,
+    collection,
+    currency,
+    quantity,
+    tradable,
+    marketable,
+    raw,
   };
 }
 
 /**
- * Upsert inventory items:
- * - Insert: sets first_seen_at, last_seen_at
- * - Update: bumps last_seen_at, updates fields
+ * Upserts a full inventory snapshot.
+ * - Items seen in this run get: last_seen_at = seenAt AND removed_at = NULL
+ * - Items NOT seen in this run get: removed_at = NOW() (history kept)
  */
-async function upsertInventoryItems(items, opts = {}) {
-  const { batchSize = 500, log = console } = opts;
+async function upsertInventoryItems(items, log = console) {
   const pool = getPool();
-  const seenAt = nowIso();
+  const seenAt = new Date();
 
   const normalized = [];
   let skipped = 0;
 
-  for (const it of items || []) {
-    const n = normalizeItem(it);
-    if (!n) skipped++;
-    else normalized.push(n);
+  for (const raw of items || []) {
+    const row = normalizeItem(raw);
+    if (!row) {
+      skipped++;
+      continue;
+    }
+    normalized.push(row);
   }
 
+  if (!normalized.length) {
+    log.log("[db] nothing to upsert (normalized length = 0)");
+    return { total: 0, upserted: 0, skipped, seenAt };
+  }
+
+  const BATCH = 1000;
   let totalUpserted = 0;
 
-  for (let i = 0; i < normalized.length; i += batchSize) {
-    const batch = normalized.slice(i, i + batchSize);
+  for (let i = 0; i < normalized.length; i += BATCH) {
+    const batch = normalized.slice(i, i + BATCH);
 
-    const values = [];
     const params = [];
-    let p = 1;
+    const values = [];
 
+    // Each row produces N placeholders
+    // Keep the order EXACTLY matching the INSERT column list below.
+    let p = 1;
     for (const row of batch) {
       values.push(
         `(
@@ -130,7 +138,7 @@ async function upsertInventoryItems(items, opts = {}) {
           $${p++}, $${p++}, $${p++}, $${p++},
           $${p++}, $${p++}, $${p++},
           $${p++},
-          $${p++}, $${p++}
+          $${p++}, $${p++}, $${p++}
         )`
       );
 
@@ -164,7 +172,8 @@ async function upsertInventoryItems(items, opts = {}) {
 
         JSON.stringify(row.raw),
         seenAt, // first_seen_at candidate
-        seenAt  // last_seen_at
+        seenAt, // last_seen_at
+        null   // removed_at (present when seen)
       );
     }
 
@@ -178,7 +187,7 @@ async function upsertInventoryItems(items, opts = {}) {
         category, skin_rarity, collection, currency,
         quantity, tradable, marketable,
         raw,
-        first_seen_at, last_seen_at
+        first_seen_at, last_seen_at, removed_at
       )
       VALUES ${values.join(",")}
       ON CONFLICT (id) DO UPDATE SET
@@ -204,14 +213,29 @@ async function upsertInventoryItems(items, opts = {}) {
         raw = EXCLUDED.raw,
         updated_at = now(),
         first_seen_at = COALESCE(inventory_items.first_seen_at, EXCLUDED.first_seen_at),
-        last_seen_at = EXCLUDED.last_seen_at
+        last_seen_at = EXCLUDED.last_seen_at,
+        removed_at = NULL
     `;
 
     await pool.query(sql, params);
     totalUpserted += batch.length;
 
-    log.log(`[db] upserted batch ${Math.min(i + batch.length, normalized.length)}/${normalized.length}`);
+    log.log(
+      `[db] upserted batch ${Math.min(i + batch.length, normalized.length)}/${normalized.length}`
+    );
   }
+
+  // After a full successful sync, mark items not seen in this sync as removed (but keep them for history).
+  // NOTE: inventory_items has no steamid64 column in this project; this will mark "removed" globally.
+  await pool.query(
+    `
+    UPDATE inventory_items
+    SET removed_at = NOW()
+    WHERE removed_at IS NULL
+      AND last_seen_at < $1
+    `,
+    [seenAt]
+  );
 
   return { total: normalized.length, upserted: totalUpserted, skipped, seenAt };
 }
